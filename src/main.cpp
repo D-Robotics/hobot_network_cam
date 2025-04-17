@@ -23,10 +23,16 @@ public:
     {
         // ======================================================================================================================================
         RCLCPP_INFO(this->get_logger(), "=> init network_cam_node");
+        this->declare_parameter<std::string>("stereo_msg_topic", stereo_msg_topic_);
+        this->get_parameter("stereo_msg_topic", stereo_msg_topic_);
+        this->declare_parameter<bool>("is_mono", is_mono_);
+        this->get_parameter("is_mono", is_mono_);
+        // RCLCPP_INFO(this->get_logger(), "\033[31m=> stereo_msg_topic: %s\033[0m", stereo_msg_topic_.c_str());
+        RCLCPP_INFO_STREAM(this->get_logger(), "=> param:" << std::endl << " => stereo_msg_topic: " << stereo_msg_topic_ << std::endl << "=> is_mono: " << is_mono_ << std::endl);
 
         // ======================================================================================================================================
         // pub & sub
-        stereo_msg_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_combine_raw", 10);
+        stereo_msg_pub_ = this->create_publisher<sensor_msgs::msg::Image>(stereo_msg_topic_, 10);
 
         // ======================================================================================================================================
         int ret = 0;
@@ -102,61 +108,90 @@ private:
     {
         if (rclcpp::ok())
         {
-            RCLCPP_INFO_ONCE(rclcpp::get_logger("network_cam_node"), "=> video_decode_deinit success");
-            // std::cout << "=> decode_data_callback" << std::endl;
+            RCLCPP_INFO_ONCE(rclcpp::get_logger("network_cam_node"), "=> decode_data_callback success");
             // 分离左右拼接的 NV12 数据
             // 获取原始图像数据
             uint8_t *y_data = ouput_buffer->vframe_buf.vir_ptr[0];
             uint8_t *uv_data = ouput_buffer->vframe_buf.vir_ptr[1];
             size_t full_width = ouput_buffer->vframe_buf.width; // 原图宽度（左右拼接后）
             size_t full_height = ouput_buffer->vframe_buf.height;
+            size_t y_size = full_width * full_height;      // Y 分量大小
+            size_t uv_size = full_width * full_height / 2; // UV 分量大小
 
-            size_t out_y_size = (full_width / 2) * full_height * 2;
-            size_t out_uv_size = (full_width / 2) * full_height;
-            uint8_t *nv12_vstack = new uint8_t[out_y_size + out_uv_size];
+            if (is_mono_)
+            {
+                // 创建一个 ROS 2 图像消息
+                auto msg = std::make_shared<sensor_msgs::msg::Image>();
+                // 使用 std::chrono 获取当前时间戳
+                auto now = std::chrono::system_clock::now();
+                auto duration = now.time_since_epoch();
+                auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+                msg->header.stamp.sec = millis / 1000;                 // 秒部分
+                msg->header.stamp.nanosec = (millis % 1000) * 1000000; // 毫秒部分转换为纳秒
+                msg->header.frame_id = "mono_camera_frame";
+                msg->height = full_height;
+                msg->width = full_width;
+                msg->encoding = "nv12"; // NV12 编码
+                msg->is_bigendian = false;
+                msg->step = msg->width; // 每行数据的字节数（对于 NV12，每行是宽度字节数）
 
-            hstack_to_vstack_nv12(nv12_vstack, y_data, uv_data, full_width, full_height);
+                // 将拼接后的 Y 和 UV 数据填充到 ROS 图像消息
+                msg->data.resize(y_size + uv_size);
+                std::memcpy(msg->data.data(), y_data, y_size);            // 填充数据
+                std::memcpy(msg->data.data() + y_size, uv_data, uv_size); // 填充数据
 
-            // FILE *fp_output = NULL;
-            // fp_output = fopen("640x960.nv12", "w+b");
-            // if (!fp_output)
-            // {
-            //     printf("main fp_output open failed\n");
-            //     return -1;
-            // }
-            // if (fp_output)
-            // {
-            //     fwrite(nv12_vstack, y_size + uv_size, 1, fp_output);
-            // }
-            // fclose(fp_output);
+                // 发布图像消息
+                stereo_msg_pub_->publish(*msg);
+            }
+            else
+            {
+                size_t out_y_size = (full_width / 2) * full_height * 2;
+                size_t out_uv_size = (full_width / 2) * full_height;
+                uint8_t *nv12_vstack = new uint8_t[out_y_size + out_uv_size];
 
-            // 创建一个 ROS 2 图像消息
-            auto msg = std::make_shared<sensor_msgs::msg::Image>();
-            // 使用 std::chrono 获取当前时间戳
-            auto now = std::chrono::system_clock::now();
-            auto duration = now.time_since_epoch();
-            auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-            msg->header.stamp.sec = millis / 1000;                 // 秒部分
-            msg->header.stamp.nanosec = (millis % 1000) * 1000000; // 毫秒部分转换为纳秒
-            msg->header.frame_id = "stereo_camera_frame";
-            msg->height = full_height * 2; // 高度变为 960（上下拼接）
-            msg->width = full_width / 2;   // 宽度变为 640（上下拼接）
-            msg->encoding = "nv12";        // NV12 编码
-            msg->is_bigendian = false;
-            msg->step = msg->width; // 每行数据的字节数（对于 NV12，每行是宽度字节数）
+                hstack_to_vstack_nv12(nv12_vstack, y_data, uv_data, full_width, full_height);
 
-            // 将拼接后的 Y 和 UV 数据填充到 ROS 图像消息
-            msg->data.resize(out_y_size + out_uv_size);
-            std::memcpy(msg->data.data(), nv12_vstack, out_y_size + out_uv_size); // 填充数据
-            // std::memcpy(msg->data.data(), ouput_buffer->vframe_buf.vir_ptr[0], y_size);           // 填充数据
-            // std::memcpy(msg->data.data() + y_size, ouput_buffer->vframe_buf.vir_ptr[1], uv_size); // 填充数据
+                // FILE *fp_output = NULL;
+                // fp_output = fopen("640x960.nv12", "w+b");
+                // if (!fp_output)
+                // {
+                //     printf("main fp_output open failed\n");
+                //     return -1;
+                // }
+                // if (fp_output)
+                // {
+                //     fwrite(nv12_vstack, y_size + uv_size, 1, fp_output);
+                // }
+                // fclose(fp_output);
 
-            // 发布图像消息
-            stereo_msg_pub_->publish(*msg);
+                // 创建一个 ROS 2 图像消息
+                auto msg = std::make_shared<sensor_msgs::msg::Image>();
+                // 使用 std::chrono 获取当前时间戳
+                auto now = std::chrono::system_clock::now();
+                auto duration = now.time_since_epoch();
+                auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+                msg->header.stamp.sec = millis / 1000;                 // 秒部分
+                msg->header.stamp.nanosec = (millis % 1000) * 1000000; // 毫秒部分转换为纳秒
+                msg->header.frame_id = "stereo_camera_frame";
+                msg->height = full_height * 2; // 高度变为 960（上下拼接）
+                msg->width = full_width / 2;   // 宽度变为 640（上下拼接）
+                msg->encoding = "nv12";        // NV12 编码
+                msg->is_bigendian = false;
+                msg->step = msg->width; // 每行数据的字节数（对于 NV12，每行是宽度字节数）
 
-            // 释放内存
-            delete[] nv12_vstack;
-            nv12_vstack = nullptr;
+                // 将拼接后的 Y 和 UV 数据填充到 ROS 图像消息
+                msg->data.resize(out_y_size + out_uv_size);
+                std::memcpy(msg->data.data(), nv12_vstack, out_y_size + out_uv_size); // 填充数据
+                // std::memcpy(msg->data.data(), ouput_buffer->vframe_buf.vir_ptr[0], y_size);           // 填充数据
+                // std::memcpy(msg->data.data() + y_size, ouput_buffer->vframe_buf.vir_ptr[1], uv_size); // 填充数据
+
+                // 发布图像消息
+                stereo_msg_pub_->publish(*msg);
+
+                // 释放内存
+                delete[] nv12_vstack;
+                nv12_vstack = nullptr;
+            }
         }
         return 0;
     }
@@ -199,11 +234,16 @@ private:
             // 拷贝右图UV（下半部分）
             std::memcpy(nv12_vstack + out_y_size + (row + single_height / 2) * out_uv_stride, uv_data + row * uv_stride + single_width, single_width);
         }
+
+        return 0;
     }
 
     // stereo image publisher
+    std::string stereo_msg_topic_ = "/image_combine_raw";
     static rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr stereo_msg_pub_;
+    static bool is_mono_;
 };
+bool NetworkCamNode::is_mono_ = false;
 
 rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr NetworkCamNode::stereo_msg_pub_ = nullptr;
 

@@ -39,6 +39,8 @@ def set_configurable_parameters(parameters):
 
 def generate_launch_description():
     node_params = [
+        {"name": "stereo_msg_topic", "default_value": "/image_combine_raw", "description": "stereo_msg_topic"},
+        {"name": "is_mono", "default_value": "false", "description": "is_mono"},
         {"name": "log_level", "default_value": "info", "description": "log_level"},
     ]
 
